@@ -1,0 +1,83 @@
+name: DevSecOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # ==========================================
+  # 第二步：靜態工具掃描 (SAST / SCA / Secret)
+  # ==========================================
+  static-security-scan:
+    name: Static Security Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarQube 與 Gitleaks 需要完整的 Git 歷史紀錄
+
+      # 1. Gitleaks 金鑰掃描
+      - name: Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true # 避免因過往舊金鑰卡住，但報告仍會顯示
+
+      # 2. OWASP Dependency-Check 依賴項漏洞掃描
+      - name: OWASP Dependency-Check Scan
+        uses: dependency-check/Dependency-Check_Action@main
+        id: Dependency-Check
+        with:
+          project: 'My-Vulnerable-App'
+          path: '.'
+          format: 'HTML'
+          out: 'reports' # 報告會輸出到 reports 資料夾
+
+      # 儲存 Dependency-Check 報告
+      - name: Upload Dependency-Check Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: reports
+
+      # 3. SonarQube 代碼品質與漏洞分析
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  # ==========================================
+  # 第三步：動態漏洞實戰 (DAST)
+  # ==========================================
+  dynamic-security-scan:
+    name: Dynamic Security Scanning (DAST)
+    runs-on: ubuntu-latest
+    needs: static-security-scan # 靜態掃描過後才執行動態掃描
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. 將您的 Web 應用打包成 Docker Image 並在背景執行
+      - name: Build and Run Web Application
+        run: |
+          docker build -t my-vulnerable-app .
+          docker run -d -p 3000:3000 --name web-service my-vulnerable-app
+          # 等待服務完全啟動
+          sleep 5
+          curl -I http://localhost:3000
+
+      # 2. 呼叫 OWASP ZAP 容器對服務發起掃描
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # 由於是在同台 GitHub Runner 上，ZAP 容器可以直接透過 docker0 網域存取宿主機的 3000 埠口
+          target: 'http://172.17.0.1:3000' 
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
